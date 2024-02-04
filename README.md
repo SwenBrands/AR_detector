@@ -53,3 +53,9 @@ sets <version> attribute in the netCDF files, is no longer used
 6 mask.sh
 sets attributes of the netCDF file containing the binary AR coverage mask used in the TIER1 intercomparison paper (Rutz et al. 2019), is no longer in use
 
+
+Credits
+-------
+This ongoing research work is supported by the Atmospheric River Tracking Method Intercomparison Project (ARTMIP), sponsored by NCAR, SCRIPPS and the U.S. Department of Energy, among others.
+
+![alt text](https://www.cgd.ucar.edu/sites/default/files/2022-09/ARTMIP_2014Jan24.UK_.flooding.jpg)
