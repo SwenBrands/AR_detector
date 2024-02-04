@@ -1,0 +1,154 @@
+# import xarray as xr
+# import numpy as np
+# import pandas as pd
+# import sys
+# import dask
+# import os
+# import numpy.matlib
+# import string
+# from datetime import datetime
+# from dateutil.parser import parse
+# from matplotlib import pyplot as plt
+# import scipy.stats
+# from mpl_toolkits.basemap import Basemap
+
+import xarray as xr
+import dask
+import numpy as np
+import pandas as pd
+import os
+import numpy.matlib
+import matplotlib
+matplotlib.use('Agg')
+from matplotlib import pyplot as plt
+import scipy.stats
+from math import radians, cos, sin, asin, sqrt
+import sys
+from calendar import isleap
+from mpl_toolkits.basemap import Basemap
+
+## USER OPTIONS ########################################################
+
+homedir = os.getenv("HOME")
+lustre = os.getenv("LUSTRE")
+dataset = 'cesm1_2'
+experiment = '10ka_orbital' #10ka_orbital, pi_21ka_co2, preindust
+run = 'r1'
+#minlat = [20, 10]
+#maxlat = [80, 70]
+#minlon = [-46, -56]
+#maxlon = [26, 16]
+#region = ['gb','wiberia']
+minlat = [5]
+maxlat = [85]
+minlon = [0]
+maxlon = [360]
+region = ['nhemis']
+tarprct = [50, 85, 90, 95, 97.5]
+cbounds = range(0,500,25)
+cea_lat = 45
+timesteps = '00 06 12 18 UTC'
+
+## EXECUTE #############################################################
+srcdir = lustre+'/swen/datos/GCMData/'+dataset+'/'+experiment+'/'+run
+outdir = lustre+'/swen/datos/tareas_meteogalicia/ar/my_catalogues/'+dataset+'/'+experiment+'/'+run+'/prct'
+
+if experiment == 'preindust':
+	filename = srcdir+'/IVT.cam.h2.0121.nc' #this is an example file to obtain the lats and lons
+	startyear = '0121'
+	endyear = '0150'
+	file_base = 'IVT.cam.h2.0'
+elif experiment == '10ka_orbital':
+	filename = srcdir+'/IVT.cam.h2.0271.nc'
+	startyear = '0271'
+	endyear = '0300'
+	file_base = 'IVT.cam.h2.0'
+elif experiment == 'pi_21ka_co2':
+	filename = srcdir+'/IVT.cam.h2.0061.nc'
+	startyear = '0061'
+	endyear = '0090'
+	file_base = 'IVT.cam.h2.00'
+else:
+	raise Exception('ERROR: check entry for <experiment>!')
+
+years = np.arange(int(startyear),int(endyear)+1,1)
+dates = pd.period_range(start=str(startyear)+'-01-01 00:00:00', end=str(endyear)+'-12-31 18:00:00', periods=None, freq='6H') #for 6-hourly data, real date vector starts at 06UTC and ends at 0UTC at year +1, but the exact temporal range is not relevant for calculating percentiles.
+#dates = pd.period_range(start=str(startyear)+'-01-01 06:00:00', end='00'+str(int(endyear)+1)+'-01-01 00:00:00', periods=None, freq='6H') #for 6-hourly data starting at 06UTC and ending at 00UTC of year+1
+
+#remove February 29th in leap years
+leap = []
+for each in dates:
+    if each.month==2 and each.day ==29:
+        leap.append(each)
+dates = dates.drop(leap)
+
+for rr in xrange(len(region)):
+    print('Target region is '+region[rr])
+    print('Latitude window is '+str(minlat[rr])+' and '+str(maxlat[rr]))
+    print('Longitude window is '+str(minlon[rr])+' and '+str(maxlon[rr]))
+    
+    #get size of the final data matrix    
+    nc = xr.open_dataset(filename)
+    lat = nc.lat.values
+    lon = nc.lon.values
+    latind = np.where((lat >= minlat[rr]) & (lat <= maxlat[rr]))
+    lonind = np.where((lon >= minlon[rr]) & (lon <= maxlon[rr]))
+    lat = lat[latind]
+    lon = lon[lonind]
+    
+    DATA = np.zeros((len(dates),len(lat),len(lon)))
+    #then loop through individual years and retain the data over the entire domain
+    for yy in xrange(len(years)):       
+        print('Loading year '+str(years[yy]))
+        #filename = srcdir+'/'+str(years[yy])+'/ARTMIP_MERRA_2D_*.nc'
+        filename = srcdir+'/'+file_base+str(years[yy])+'.nc'
+        nc = xr.open_mfdataset(filename,concat_dim='time')
+        lat = nc.lat.values
+        lon = nc.lon.values
+        latind = np.where((lat >= minlat[rr]) & (lat <= maxlat[rr]))
+        lonind = np.where((lon >= minlon[rr]) & (lon <= maxlon[rr]))
+        lat = lat[latind]
+        lon = lon[lonind]
+        datayear = nc.IVT.sel(lat=lat,lon=lon)
+        datayear = datayear.values
+        fillind = np.where(dates.year==years[yy])[0]
+        DATA[fillind,:,:] = datayear
+        del fillind
+        del datayear
+        nc.close()
+    
+    print('INFO: the data for all years have been loaded...')
+    
+    ##filter out the 6-hourly values
+    #ind6h = range(0,len(DATA),2)
+    #DATA = DATA[ind6h,:,:]
+    prctile = np.percentile(DATA, tarprct, axis=0, overwrite_input=True)
+    
+    ##Pandas option to calc percentiles
+    #DATA = xr.DataFrame(DATA)
+    #prctile = DATA.quantile(np.array(tarprct)/100)
+    #prctile = prctile.values
+    #DATA = DATA.values
+    
+    #output = xr.DataArray(prctile, coords=[range(len(tarprct)), range(len(lat)), range(len(lon))], dims=['percentile', 'lat', 'lon'], name = 'percentiles')
+    output = xr.DataArray(prctile, coords=[tarprct, lat, lon], dims=['percentile', 'lat', 'lon'], name = 'ivt')
+    output.attrs['percentile_period'] = str(startyear)+' to '+str(endyear)+', '+timesteps
+    savename = outdir+'/'+region[rr]+'/percentiles_'+region[rr]+'_'+dataset+'_'+experiment+'_'+run+'.nc'
+    print('INFO: saving the percentiles in '+savename)
+    output.to_netcdf(savename)
+    output.close()
+    
+    #then plot the percentiles in a map
+    for pp in xrange(prctile.shape[0]):
+        fig1 = plt.figure()
+        #mymap = Basemap(projection='cea',llcrnrlon=np.min(lon),llcrnrlat=np.min(lat),urcrnrlon=np.max(lon),urcrnrlat=np.max(lat),lat_ts=cea_lat)
+        mymap = Basemap(projection='npstere',boundinglat=minlat[0],lon_0=0)
+        X, Y = np.meshgrid(lon,lat) #obtain a meshgrid
+        X, Y = mymap(X,Y) #then transform to cea coordinates        
+        mymap.contourf(X,Y, prctile[pp,:,:], cbounds, cmap="ocean", vmin=cbounds[0], vmax=cbounds[-1])
+        #mymap.pcolormesh(X,Y, prctile[pp,:,:], cmap="ocean", latlon=True, vmin=cbounds[0], vmax=cbounds[-1])
+        mymap.drawcoastlines()
+        plt.colorbar(orientation="vertical")
+        savename=outdir+'/'+region[rr]+'/percentile_'+str(tarprct[pp])+'_'+region[rr]+'_'+dataset+'_'+experiment+'_'+run+'.png'
+        fig1.savefig(savename, dpi=300)
+        plt.close(fig1)

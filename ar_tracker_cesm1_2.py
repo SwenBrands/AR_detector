@@ -1,0 +1,431 @@
+import xarray as xr
+import dask
+import numpy as np
+import pandas as pd
+import os
+import numpy.matlib
+import matplotlib
+matplotlib.use('Agg')
+from matplotlib import pyplot as plt
+import scipy.stats
+from mpl_toolkits.basemap import Basemap
+from mpl_toolkits.basemap import addcyclic
+from math import radians, cos, sin, asin, sqrt
+import sys
+
+execfile('haversine.py')
+execfile('get_wind_sector.py')
+execfile('shiftlons.py')
+
+## USER OPTIONS ########################################################
+region = str(sys.argv[1]) # defines first input argument, i.e. the region
+taryear = str(sys.argv[2]) # defines first input argument, i.e. the start year of the simulation
+version = str(sys.argv[3]) #v1.1
+dataset = str(sys.argv[4]) #'ccsm4'
+experiment = str(sys.argv[5]) #preindust, 10ka_orbital, pi_21ka_co2
+runspec = str(sys.argv[6]) #'r6i1p1'
+
+#region = 'na2eu'
+#taryear = '0061' #0121 for preindust, 0271 for 10ka_orbital, 0061 for pi_21ka_co2, must be a string with 4 characters!
+#version = 'v3.2'
+#dataset = 'cesm1_2'
+#experiment = 'pi_21ka_co2' 
+#runspec = 'r1'
+
+homedir = os.getenv("HOME")
+lustre = os.getenv("LUSTRE")
+region_prct = 'nhemis' #region for which the percentiles were calculated previously with get_percentiles_cesm1_2.py
+#gb = 15 #maximum number of movements from grid-box to grid-box, this parameter was replaced from versions .1 onwards and replaced by the km threshold
+visualize = 'no' #yes or no
+initiative = 'Paleo ARTMIP' #the initiative this catalogue is used in, is used as netCDF attribute below.
+srcdir = lustre+'/swen/datos/GCMData/'+dataset+'/'+experiment+'/'+runspec
+cataldir = lustre+'/swen/datos/tareas_meteogalicia/ar/my_catalogues/'+dataset+'/'+experiment+'/'+runspec+'/results/'+region+'/'+version
+prctdir_base = lustre+'/swen/datos/tareas_meteogalicia/ar/my_catalogues/'+dataset #base directory of the percentile file, is further expanded below.
+#plotdir = lustre+'/swen/datos/tareas_meteogalicia/ar/figs'
+plotdir = cataldir+'/figs'
+cbounds = range(0,1000,100)
+
+## EXECUTE #############################################################
+#fixed parameters
+prct_region = 'nhemis' #may be put as inupt variable in future versions of this script.
+
+##geographical domain for background ivt fields, longitudes must be in 0-360 degrees format
+minlat = 5
+maxlat = 85
+maxlat_plt = 70
+minlon = 0
+maxlon = 360
+
+##ARs are tracked for this domain
+if region == 'na2eu':
+    minlat2 = 29
+    maxlat2 = 63
+    minlon2 = -151
+    maxlon2 = 31
+    
+    ##smaller domain for short tests
+    #minlat2 = 29
+    #maxlat2 = 63
+    #minlon2 = -151
+    #maxlon2 = -148
+else:
+    raise Exception('check entry for <region>!')
+
+if version in ('v1.1','v1.2'):
+    detect_lim = 95 #detection percentile
+    track_lim = 90 #tracking percentile
+    th_abs_detect = 250 #241.5 #absolute ivt threshold at detection point
+    th_abs_track = 250 #241.5 #absolute ivt threshold alongside the track
+    th_km = 1500 #minumum ar distance in km
+elif version in ('v2.1','v2.2'):
+    detect_lim = 90 #detection percentile
+    track_lim = 85 #tracking percentile
+    th_abs_detect = 500 #241.5 #absolute ivt threshold at detection point
+    th_abs_track = 250 #241.5 #absolute ivt threshold alongside the track
+    th_km = 1500 #minumum ar distance in km
+elif version in ('v3.1','v3.2'):
+    detect_lim = 90 #detection percentile
+    track_lim = 85 #tracking percentile
+    th_abs_detect = 250 #241.5 #absolute ivt threshold at detection point
+    th_abs_track = 250 #241.5 #absolute ivt threshold alongside the track
+    th_km = 1500 #minumum ar distance in km
+else:
+    raise Exception('ERROR: check entry for <version>!')
+
+#set the percentile reference experiment
+if version in ('v1.1','v2.1','v3.1'):
+    prct_experiment = 'preindust'
+elif version in ('v1.2','v2.2','v3.2') and experiment != 'preindust':
+    prct_experiment = experiment
+else:
+    raise Exception('ERROR: entries for <version> and <experiment> are inconsistent!')
+
+print('Info: Version '+version+' will use detection percentile '+str(detect_lim)+', tracking percentile '+str(track_lim)+', absolute detection limit '+str(th_abs_detect)+', absolute track limit '+str(th_abs_track)+' and length criterion '+str(th_km)+'.')
+prctdir = prctdir_base+'/'+prct_experiment+'/'+runspec+'/prct/'+region_prct
+prctfile = prctdir+'/percentiles_'+prct_region+'_'+dataset+'_'+prct_experiment+'_'+runspec+'.nc'
+print('Percentiles are loaded from:')
+print(prctfile)
+
+if experiment == 'preindust':
+    orig_year = '0121'
+elif experiment == '10ka_orbital':
+	orig_year = '0271'
+elif experiment == 'pi_21ka_co2':
+	orig_year = '0061' #must start with an 0. Otherwise, it is not read by pandas.period_range called below
+else:
+    raise Exception('ERROR: check entry for <experiment>!')
+
+outputlabel = dataset+'_'+experiment+'_'+runspec+'_Brands_'+str(version)
+#get lons and lats for this dataset using an example file
+gridfile = lustre+'/swen/datos/GCMData/'+dataset+'/'+experiment+'/'+runspec+'/IVT.cam.h2.'+orig_year+'.nc'
+nc = xr.open_dataset(gridfile)
+lat_orig = nc.lat.values
+lon_orig = nc.lon.values
+nc.close()
+#shift to -180-180 degrees format
+mask = np.where(lon_orig > 180)[0]
+lon_orig[mask] = lon_orig[mask]-float(360)
+lon_orig.sort()
+del(mask)
+
+##construct domain for AR tracking
+minlat2_ind = np.argmin(np.abs(lat_orig-minlat2))
+maxlat2_ind = np.argmin(np.abs(lat_orig-maxlat2))
+minlon2_ind = np.argmin(np.abs(lon_orig-minlon2))
+maxlon2_ind = np.argmin(np.abs(lon_orig-maxlon2))
+detect_lat = lat_orig[minlat2_ind:maxlat2_ind]
+detect_lon = lon_orig[minlon2_ind:maxlon2_ind]    
+detect_lon, detect_lat = np.meshgrid(detect_lon,detect_lat)
+detect_lon = np.ndarray.flatten(detect_lon)
+detect_lat = np.ndarray.flatten(detect_lat)
+
+print('Target region is '+region)
+print('Latitude window is '+str(minlat)+' and '+str(maxlat))
+print('Longitude window is '+str(minlon)+' and '+str(maxlon))
+print('Target year '+str(taryear))
+
+# create the calendar
+#dates = pd.period_range(start=str(taryear)+'-01-01 00:00:00', end=str(taryear)+'-12-31 18:00:00', periods=None, freq='6H')
+dates = pd.period_range(start=str(taryear)+'-01-01 06:00:00', end='00'+str(int(taryear)+1)+'-01-01 00:00:00', periods=None, freq='6H') #data starts at 06 UTC
+dates_ref = pd.period_range(start=orig_year+'-01-01 06:00:00', end='00'+str(int(taryear)+1)+'-01-01 00:00:00', periods=None, freq='6H') #reference for time vector starting at 00 UTC of orig_year and ending at OO UTC of taryear+1
+orig_date = pd.period_range(start=orig_year+'-01-01 00:00:00', end=orig_year+'-01-01 06:00:00', periods=None, freq='6H')[0] #reference for time variable is 00 UTC
+
+#remove February 29th in leap years from both date vectors
+leap = []
+for each in dates:
+    if each.month==2 and each.day ==29:
+        leap.append(each)
+dates = dates.drop(leap)
+leap = []
+for each in dates_ref:
+    if each.month==2 and each.day ==29:
+        leap.append(each)
+dates_ref = dates_ref.drop(leap)
+
+filename_all = srcdir+'/IVT.cam.h2.'+str(taryear)+'.nc'
+
+#load uvit, vivt, ivt, lat, lon and time
+print('loading uivt (nc variable name: IVTx), vivt (IVTy), ivt (IVT), lat, lon and time...')
+print(filename_all)
+nc_all = xr.open_mfdataset(filename_all,concat_dim='time')
+lat = nc_all.lat.values
+lon = nc_all.lon.values
+latind = np.where((lat >= minlat) & (lat <= maxlat))
+lonind = np.where((lon >= minlon) & (lon <= maxlon))
+lat = lat[latind]
+lon = lon[lonind]
+uivt = nc_all.IVTx.sel(lat=lat,lon=lon).values
+vivt = nc_all.IVTy.sel(lat=lat,lon=lon).values
+ivt = nc_all.IVT.sel(lat=lat,lon=lon).values
+time = nc_all.time.values
+nc_all.close()
+
+#shift the projection and data to -180 to 180 longitudes
+lon_shifted, uivt = shiftlons(lon,uivt) #lon is kept
+lon_shifted, vivt = shiftlons(lon,vivt) #lon is kept
+lon, ivt = shiftlons(lon,ivt) #lon is overwriten
+
+#test if the time dimension in the nc files is correct
+if time.shape[0] == dates.shape[0]:
+    print('INFO: length of the time variable coincides!')
+else:
+    raise Exception('length of the time variable does NOT coincide!')
+
+#load percentiles
+nc = xr.open_mfdataset(prctfile)
+th_prct = nc.percentile.values
+th_ivt = nc.ivt.values
+percentile_period = str(nc.ivt.percentile_period)
+prct_lon = nc.lon.values
+prct_lat = nc.lat.values
+nc.close()
+
+#get target percentile
+ind_detect = np.where(th_prct == detect_lim)
+ind_track = np.where(th_prct == track_lim)
+th_ivt_detect = np.squeeze(th_ivt[ind_detect[0],:,:])
+#th_track = np.squeeze(th_ivt[ind_track[0],:,:])
+th_ivt_track = np.squeeze(th_ivt[ind_track[0],:,:])
+
+#shift the projection and data to -180 to 180 longitudes
+prct_lon_shifted, th_ivt_detect = shiftlons(prct_lon,th_ivt_detect) #prct_lon is kept
+prct_lon, th_ivt_track = shiftlons(prct_lon,th_ivt_track) #prct_lon is overwritten
+
+#check if longitudes for ivt data and percentiles are the same
+if sum(prct_lon-lon) != 0:
+    raise Exception('lon and prct_lon are not equal!!')
+
+##Initiate the final AR absences presence array
+gbnumber = len(detect_lat)
+out_ar_end = np.zeros((len(dates),gbnumber))
+
+for st in xrange(gbnumber):
+    print('target latitude is '+str(detect_lat[st]))
+    print('target longitude is '+str(detect_lon[st]))
+    print('processing '+str(st)+' out of '+str(gbnumber)+' gridboxes')
+    
+    #get ivt at detection barrier
+    latind = np.where(lat==detect_lat[st])
+    #latind = latind[1]
+    lonind = np.where(lon==detect_lon[st])
+    #lonind = lonind[1]
+    ivt_detect = np.squeeze(ivt[:,latind,lonind])
+    th_detect = np.squeeze(th_ivt_detect[latind,lonind])
+
+    ## initiate output variables
+    #generate binary absence presence time series
+    out_ar = np.zeros(len(dates)) #ar presence / absence
+    out_lat = [None] * len(dates) #ar latitudes
+    out_lon = [None] * len(dates) #ar longitudes
+    out_km = [None] * len(dates) #distances between grib-boxes affected by ar
+    out_ivt = [None] * len(dates) #ar ivt values
+
+    #get dates when threshold ivt is exceeded at detection barrier
+    arind = np.where((ivt_detect > th_detect) & (ivt_detect > th_abs_detect))
+    arind = arind[0]
+    
+    #If no ARs present at this gridbox, continue the loop and go to next gridbox
+    if len(arind)==0:
+        #print('IVT at detection point is '+str(th_detect)+'...skip loop')
+        continue
+    
+    #retain the data for these dates
+    ivt_detect_1 = ivt_detect[arind] #"1" for AR occurrence = yes
+    ivt_1 = ivt[arind,:,:]
+    uivt_1 = uivt[arind,:,:]
+    vivt_1 = vivt[arind,:,:]
+    dates_1 = dates[arind]
+
+    #calc wind direction for each timestep and grid-box
+    D_1 = (np.arctan2(uivt_1/ivt_1,vivt_1/ivt_1) * (180/np.pi)) + 180
+    
+    #bis hierhin
+
+    ## START the loop to check for AR length ##############################
+    for tt in xrange(len(arind)):
+        #get values for the target hour and find the inital grid box        
+        ivt_t = ivt_1[tt,:,:]
+        uivt_t = uivt_1[tt,:,:]
+        vivt_t = vivt_1[tt,:,:]
+        D_t = D_1[tt,:,:]        
+        
+        startlat = lat[latind]
+        startlon = lon[lonind]
+        ar_lat = lat[latind] #init array of lats along the AR track
+        ar_lon = lon[lonind] #init array of lons along the AR track
+        ar_ivt = ivt_detect_1[tt] #init array of AR length in KM
+        ar_km = np.zeros(1) #init array of AR length in KM
+            
+        #TRACKING LOOP #################################################
+        km = 0.
+        keep_tracking = 1
+        counter = 0
+        while keep_tracking == 1:
+        #for gg in xrange(gb):
+        #for gg in xrange(6):
+            #find latlons in the large domain
+            if counter == 0:
+                indlat = np.where(lat == startlat)[0]
+                indlon = np.where(lon == startlon)[0]
+            else:
+                indlat = np.where(lat == lat_nn)[0]
+                indlon = np.where(lon == lon_nn)[0]
+            
+            #find the 3 upstream grid boxes
+            direction = D_t[indlat,indlon][0]        
+            ind_nn_lon, ind_nn_lat = get_wind_sector(direction,indlat,indlon)
+            
+            #just to be sure, delete lat_nn and lon_nn
+            if counter >= 1:
+                del lat_nn
+                del lon_nn
+            
+            lat_nn = lat[ind_nn_lat]
+            lon_nn = lon[ind_nn_lon]
+            max_nn = np.max(ivt_t[ind_nn_lat,ind_nn_lon]) #get maximum ivt of the 3 uptreams points
+            ind_max_nn = np.argmax(ivt_t[ind_nn_lat,ind_nn_lon]) #get the index (0 to 2) of the grid box with max. ivt       
+            lat_nn = lat_nn[ind_max_nn] #the lat of this point
+            lon_nn = lon_nn[ind_max_nn] #the lon of this point
+            
+            #check lenght criterion
+            km = km+haversine(ar_lon[-1], ar_lat[-1], lon_nn, lat_nn)
+            nn_ivt_t = ivt_t[ind_nn_lat[ind_max_nn],ind_nn_lon[ind_max_nn]]
+            if (nn_ivt_t > th_ivt_track[ind_nn_lat[ind_max_nn],ind_nn_lon[ind_max_nn]]) and (nn_ivt_t > th_abs_track) and (km <= th_km): #if ivt thresholds are exceeded
+               #print('IVT threshold is exceeded... keep on tracking')
+               ar_lat = np.append(ar_lat,lat_nn)
+               ar_lon = np.append(ar_lon,lon_nn)
+               ar_ivt = np.append(ar_ivt,nn_ivt_t)
+               keep_tracking = 1
+               counter = counter+1
+            else:
+               #print('IVT threshold is not exceeded... stop tracking!')
+               #break
+               keep_tracking = 0
+        ## END OF WHILE LOOP FOR AR TRACKING ###########################################
+        
+        #print(km)
+        if counter == 0:
+            out_ar[arind[tt]] = 0 #no AR present
+            #print('is not an AR')
+        else:
+            if km > th_km:
+                out_ar[arind[tt]] = 1 #fill ar presence
+                out_lat[arind[tt]] = ar_lat #fill ar lats
+                out_lon[arind[tt]] = ar_lon #fill ar lons
+                out_km[arind[tt]] = km #fill distances between grid boxes
+                out_ivt[arind[tt]] = ar_ivt #fill ar ivt values
+                #print('is an AR')
+                
+                ## plot a map for this AR event
+                if visualize == 'yes':                               
+                    #mymap = Basemap(projection='ortho',lat_0=np.median(detect_lat),lon_0=np.median(detect_lon))
+                    mymap = Basemap(projection='cyl', resolution='l', llcrnrlon=np.min(lon),llcrnrlat=np.min(lat),urcrnrlon=np.max(lon),urcrnrlat=np.max(lat))
+                    X, Y = np.meshgrid(lon,lat)
+                    #XX, YY = mymap(X*180./np.pi, Y*180./np.pi)
+                    mymap.drawcoastlines()
+                    #mymap.contour(X, Y, ivt_t, cbounds, cmap='hot')
+                    #mymap.pcolormesh(X, Y, ivt_t, cmap='hot_r', latlon=True, vmin=cbounds[0], vmax=cbounds[-1])
+                    mymap.pcolormesh(X, Y, ivt_t, cmap='hot_r', vmin=cbounds[0], vmax=cbounds[-1])
+                    mymap.plot(ar_lon,ar_lat, 'bo', markersize=1)
+                    mymap.plot(np.array((detect_lon[0],detect_lon[0],detect_lon[-1],detect_lon[-1])),np.array((detect_lat[0],detect_lat[-1],detect_lat[0],detect_lat[-1])), 'bo', markersize=3)
+                    savename=plotdir+'/'+region+'_'+str(dates_1[tt]).replace('-','').replace(' ','').replace(':','')+'_lat_'+str(round(startlat,2)).replace('.','_')+'_lon_'+str(round(startlon,2)).replace('.','_')+'.png'
+                    print(savename)
+                    plt.savefig(savename, format='png', dpi=200.)
+                    plt.close()            
+            else:
+                out_ar[arind[tt]] = 0 #no AR present
+                #print('is not an AR')
+    del(km)
+    ## save ar absence and presence at each grid box    
+    out_ar_end[:,st] = out_ar
+    del arind #delete arind
+
+## finally save in netCDF4 format
+print('INFO: Start postprocessing for lat: '+str(detect_lat[st])+' and lon; '+str(detect_lon[st]))
+#load the global lat lon grid
+nc = xr.open_mfdataset(gridfile) #gridfile is defined in line 68
+lat_grid = nc.lat.values
+lon_grid = nc.lon.values
+nc.close()
+
+# #create an xarray DataArray and fill in values
+outdata = np.zeros((len(dates),len(lat_grid),len(lon_grid)), dtype='int8')
+
+#shift the longitudes to -180 to 180 degrees format
+lon_grid, notused = shiftlons(lon_grid,outdata[0,:,:])
+del(notused)
+
+for ff in xrange(len(detect_lat)):
+    ar_step = out_ar_end[:,ff]
+    ar_step = np.expand_dims(ar_step,1)
+    ar_step = np.expand_dims(ar_step,1)
+    ar_step = np.int8(ar_step)
+    latind = np.where(lat_grid == detect_lat[ff])
+    lonind = np.where(lon_grid == detect_lon[ff])
+    outdata[:,latind,lonind] = ar_step
+    del latind; del lonind
+
+##re-convert to float64 or double so that the data can be saved
+#lat_grid = np.float64(lat_grid)
+#lon_grid = np.float64(lon_grid)
+lat_grid = np.double(lat_grid)
+lon_grid = np.double(lon_grid)
+
+#generate final xarray DataArray, with time dimension in "hours since " format and save to netcdf
+#dates_nc = np.arange(0,len(dates)*6,6).astype('double')
+dates_nc = np.linspace(0.25,len(dates_ref)/4,len(dates_ref)) #time unit is "days since 00 UTC of this year". Since the first time step is 06 UTC, it starts with 0.25
+dates_nc = dates_nc[len(dates_ref)-len(dates):].astype('double') #retain the last 365 days / 1460 6-hourly time steps
+output = xr.DataArray(outdata, coords=[dates_nc, lat_grid, lon_grid], dims=['time', 'lat', 'lon'], name = 'ar_binary_tag')
+output.time.attrs['units'] = 'days since '+str(orig_date)
+output.time.attrs['long_name'] = 'time'
+output.lat.attrs['units'] = 'degrees north'
+output.lat.attrs['long_name'] = 'latitude'
+output.lat.attrs['axis'] = 'Y'
+output.lon.attrs['units'] = 'degrees east'
+output.lon.attrs['long_name'] = 'longitude'
+output.lon.attrs['axis'] = 'X'
+output.attrs['description'] = 'binary indicator of atmospheric river occurrence'
+output.attrs['scheme'] = 'Brands based on doi:10.1007/s00382-016-3095-6'
+output.attrs['version'] = version
+output.attrs['prct_threshold_detect'] = str(detect_lim)
+output.attrs['prct_threshold_track'] = str(track_lim)
+output.attrs['abs_threshold_detect'] = str(th_abs_detect)+' kg m-1 s-1'
+output.attrs['abs_threshold_track'] = str(th_abs_track)+' kg m-1 s-1'
+output.attrs['length_threshold'] = str(th_km)+' km'
+output.attrs['relative_time_period_info'] = 'Based on percentile thresholds calculated upon years '+percentile_period+' of the '+dataset+' '+prct_experiment+' '+runspec+' simulation.'
+output.attrs['model'] = dataset
+output.attrs['model_compset'] = '1850_CAM5_CLM45%BGC_CICE_POP2_RTM_SGLC_SWAV'
+output.attrs['model_reference_article'] = 'DOI: 10.1126/sciadv.aat9658'
+output.attrs['experiment'] = experiment
+output.attrs['run'] = runspec
+output.attrs['region'] = region
+output.attrs['initiative'] = initiative
+output.attrs['contact'] = 'swen.brands@gmail.com'
+output.attrs['annotations'] = 'the <run> attribute was set by Swen Brands for internal file organisation.'
+
+savefile = cataldir+'/'+outputlabel+'_'+str(taryear)+'.nc4'
+print(savefile)
+output.to_netcdf(savefile, format='NETCDF4')
+output.close()
+print('INFO: ar_tracker_cesm1_2.py has finished successfully, exiting now...')
+exit()
